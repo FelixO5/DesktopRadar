@@ -11,7 +11,8 @@ sweep. One Python/Qt codebase for **Linux (Ubuntu/GNOME), macOS and Windows**.
 - Blips are triangles pointing along each aircraft's ground track, labelled
   callsign + `FLxxx`, colour-banded by altitude (amber < 10,000 ft, green < 30,000 ft,
   cyan above, grey on the ground) and dimmed as their position ages
-- Emergency squawks (7500/7600/7700) are red with a flashing ring
+- Military aircraft (as flagged in the feed's `dbFlags`) are magenta at any altitude
+- Emergency squawks (7500/7600/7700) are red with a flashing ring, overriding other colours
 - Hover a blip for details; click to pin them (callsign, type, registration, altitude +
   climb/descent arrow, ground speed, track, squawk, distance in miles and bearing from home)
 - Blips glide between polls (dead-reckoning from ground speed and track), then snap to

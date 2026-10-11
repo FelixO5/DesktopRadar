@@ -235,3 +235,13 @@ def test_end_to_end_failover_into_window(qapp, tmp_path):
     assert not win.scope.stale and win.scope.source_name == "airplanes.live"
     win.grab()
     assert win.scope.last_paint_stats.on_scope == 3
+
+
+def test_military_colour_and_emergency_priority():
+    from radarscope.model import Aircraft
+    from radarscope.scope_widget import COL_EMERGENCY, COL_HIGH, COL_MILITARY, altitude_colour
+    base = {"hex": "43c001", "lat": 51.9, "lon": -2.4, "alt_baro": 35000}
+    assert altitude_colour(Aircraft.from_feed(base, 0)) == COL_HIGH
+    assert altitude_colour(Aircraft.from_feed({**base, "dbFlags": 1}, 0)) == COL_MILITARY
+    assert altitude_colour(Aircraft.from_feed({**base, "dbFlags": 1, "alt_baro": "ground"}, 0)) == COL_MILITARY
+    assert altitude_colour(Aircraft.from_feed({**base, "dbFlags": 1, "squawk": "7700"}, 0)) == COL_EMERGENCY

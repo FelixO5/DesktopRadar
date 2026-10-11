@@ -34,12 +34,15 @@ COL_HIGH = QColor(0, 220, 255)      # > 30,000 ft: cyan
 COL_GROUND = QColor(120, 150, 120)
 COL_UNKNOWN = QColor(180, 180, 180)
 COL_EMERGENCY = QColor(255, 60, 60)
+COL_MILITARY = QColor(255, 80, 220)  # magenta, any altitude
 COL_STALE = QColor(255, 176, 0)
 
 
 def altitude_colour(ac: Aircraft) -> QColor:
     if ac.emergency:
         return QColor(COL_EMERGENCY)
+    if ac.military:
+        return QColor(COL_MILITARY)
     if ac.on_ground:
         return QColor(COL_GROUND)
     if ac.altitude_ft is None:
