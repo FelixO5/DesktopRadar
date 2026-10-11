@@ -10,6 +10,9 @@
 set -euo pipefail
 
 cd "$(dirname "$0")/../.."
+# Absolute paths throughout: PyInstaller resolves relative --icon/--paths
+# against the spec file's folder (build/), not the folder you ran it from.
+ROOT="$(pwd)"
 
 if [[ "$(uname)" != "Darwin" ]]; then
     echo "This script builds a macOS app and must be run on a Mac." >&2
@@ -37,19 +40,20 @@ echo "==> Installing RadarScope's libraries and the app builder (PyInstaller)…
 "$PY" -m pip install --quiet --disable-pip-version-check --upgrade pyinstaller pillow
 
 echo "==> Drawing the app icon…"
-"$PY" packaging/make_icon.py build/RadarScope-icon.png 1024 >/dev/null
+ICON="$ROOT/build/RadarScope-icon.png"
+"$PY" "$ROOT/packaging/make_icon.py" "$ICON" 1024 >/dev/null
 
 echo "==> Building RadarScope.app (this can take a few minutes)…"
 "$PY" -m PyInstaller --noconfirm --clean --log-level WARN \
     --windowed \
     --name RadarScope \
-    --icon build/RadarScope-icon.png \
+    --icon "$ICON" \
     --osx-bundle-identifier io.github.felixo5.radarscope \
-    --paths . \
-    --distpath dist --workpath build/pyinstaller --specpath build \
-    packaging/radarscope_app.py
+    --paths "$ROOT" \
+    --distpath "$ROOT/dist" --workpath "$ROOT/build/pyinstaller" --specpath "$ROOT/build" \
+    "$ROOT/packaging/radarscope_app.py"
 
-APP="dist/RadarScope.app"
+APP="$ROOT/dist/RadarScope.app"
 if [[ ! -d "$APP" ]]; then
     echo "Build failed: $APP was not created." >&2
     exit 1
