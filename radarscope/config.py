@@ -40,6 +40,8 @@ class WindowConfig:
     y: int | None = None
     size: int = DEFAULT_WINDOW_SIZE
     always_on_top: bool = True
+    #: Reopen in full screen if it was full screen when last closed.
+    fullscreen: bool = False
 
 
 @dataclass
@@ -50,6 +52,8 @@ class Config:
     scope_range_mi: int = 50
     poll_seconds: int = DEFAULT_POLL_S
     data_source: str = DATA_SOURCES[0]
+    #: Third label line with the airline / operator name.
+    show_airline_names: bool = True
     window: WindowConfig = field(default_factory=WindowConfig)
 
     @property
@@ -111,12 +115,14 @@ def from_dict(data: dict[str, Any]) -> Config:
     cfg.poll_seconds = _clamp_int(data.get("poll_seconds"), MIN_POLL_S, MAX_POLL_S, cfg.poll_seconds)
     source = data.get("data_source")
     cfg.data_source = source if source in DATA_SOURCES else DATA_SOURCES[0]
+    cfg.show_airline_names = bool(data.get("show_airline_names", True))
     win = data.get("window") if isinstance(data.get("window"), dict) else {}
     cfg.window = WindowConfig(
         x=_opt_int(win.get("x")),
         y=_opt_int(win.get("y")),
         size=_clamp_int(win.get("size"), MIN_WINDOW_SIZE, MAX_WINDOW_SIZE, DEFAULT_WINDOW_SIZE),
         always_on_top=bool(win.get("always_on_top", True)),
+        fullscreen=bool(win.get("fullscreen", False)),
     )
     return cfg
 

@@ -3,7 +3,7 @@
 import time
 
 import pytest
-from PySide6.QtCore import QElapsedTimer, QPointF, QRect
+from PySide6.QtCore import QElapsedTimer, QPointF, QRect, Qt
 from PySide6.QtWidgets import QApplication
 
 from radarscope import geo
@@ -27,8 +27,11 @@ AIRCRAFT = [
     # on the ground, near home, no track
     {"hex": "aaa003", "flight": "GND1", "lat": HOME[0] - 0.05, "lon": HOME[1] - 0.05, "alt_baro": "ground",
      "gs": 0, "seen_pos": 3.0},
-    # beyond the 50-mile scope (~120 nm north) -> clipped to the rim
-    {"hex": "aaa004", "flight": "FAR9", "lat": HOME[0] + 2.0, "lon": HOME[1], "alt_baro": 39000,
+    # just beyond the 50-mile scope (~60 nm north) -> clipped to the rim
+    {"hex": "aaa004", "flight": "FAR9", "lat": HOME[0] + 1.0, "lon": HOME[1], "alt_baro": 39000,
+     "gs": 480, "track": 180, "seen_pos": 0.5},
+    # far beyond (~120 nm, > 2x range) -> hidden
+    {"hex": "aaa006", "flight": "VFAR1", "lat": HOME[0] + 2.0, "lon": HOME[1], "alt_baro": 37000,
      "gs": 480, "track": 180, "seen_pos": 0.5},
     # no position -> dropped
     {"hex": "aaa005", "flight": "NOPOS", "alt_baro": 12000},
@@ -48,11 +51,11 @@ def make_scope(size=360):
 
 def test_render_counts(qapp):
     scope, store, result = make_scope()
-    assert result.dropped == 1 and len(store) == 4
+    assert result.dropped == 1 and len(store) == 5
     pixmap = scope.grab()  # forces a real paintEvent
     assert not pixmap.isNull()
     stats = scope.last_paint_stats
-    assert (stats.on_scope, stats.clipped) == (3, 1)
+    assert (stats.on_scope, stats.clipped, stats.hidden) == (3, 1, 1)
 
 
 def test_blip_drawn_at_correct_position(qapp):
@@ -108,10 +111,10 @@ def test_radar_window_builds_and_paints(qapp, tmp_path):
     win.show()
     assert not win.grab().isNull()
     win.step_range(+1)
-    assert cfg.scope_range_mi == 100 and win.scope.scope_range_mi == 100
-    win.step_range(-1)
-    win.step_range(-1)
-    assert cfg.scope_range_mi == 25
+    assert cfg.scope_range_mi == 60 and win.scope.scope_range_mi == 60
+    win.zoom_in()
+    win.zoom_in()
+    assert cfg.scope_range_mi == 40
     win.build_menu()
     win.shutdown()
     assert (tmp_path / "config.toml").exists()
@@ -227,7 +230,7 @@ def test_end_to_end_failover_into_window(qapp, tmp_path):
     win.poller.fetch_failed.connect(lambda *a: stale_seen.append(win.scope.stale))
     win.poller.start()
     try:
-        assert wait_for(lambda: len(win.store) == 4)
+        assert wait_for(lambda: len(win.store) == 5)
     finally:
         win.shutdown()
     assert hosts[:3] == ["api.adsb.lol"] * 3 and "api.airplanes.live" in hosts
@@ -245,3 +248,94 @@ def test_military_colour_and_emergency_priority():
     assert altitude_colour(Aircraft.from_feed({**base, "dbFlags": 1}, 0)) == COL_MILITARY
     assert altitude_colour(Aircraft.from_feed({**base, "dbFlags": 1, "alt_baro": "ground"}, 0)) == COL_MILITARY
     assert altitude_colour(Aircraft.from_feed({**base, "dbFlags": 1, "squawk": "7700"}, 0)) == COL_EMERGENCY
+
+
+def _wheel(widget, dy):
+    from PySide6.QtCore import QPoint
+    from PySide6.QtGui import QWheelEvent
+    pos = QPointF(widget.width() / 2, widget.height() / 2)
+    ev = QWheelEvent(pos, widget.mapToGlobal(pos), QPoint(0, 0), QPoint(0, dy),
+                     Qt.MouseButton.NoButton, Qt.KeyboardModifier.NoModifier,
+                     Qt.ScrollPhase.NoScrollPhase, False)
+    QApplication.sendEvent(widget, ev)
+
+
+class RecordingPoller:
+    def __init__(self):
+        self.calls = []
+
+    def update_params(self, params, refresh=True):
+        self.calls.append((params.radius_nm, refresh))
+
+    def stop(self):
+        pass
+
+
+def test_scroll_zoom_steps_ladder_and_debounces_polling(qapp, tmp_path):
+    cfg = Config(postcode="GL14 2AB", home_lat=HOME[0], home_lon=HOME[1], scope_range_mi=50)
+    win = RadarWindow(cfg, tmp_path / "config.toml", start_polling=False)
+    win.poller = RecordingPoller()
+    win.show()
+    _wheel(win.scope, 120)          # one notch away from you: zoom in
+    assert cfg.scope_range_mi == 40
+    _wheel(win.scope, 60)           # half a notch (trackpad): accumulates, no change yet
+    assert cfg.scope_range_mi == 40
+    _wheel(win.scope, 60)
+    assert cfg.scope_range_mi == 30
+    _wheel(win.scope, -360)         # three notches back: zoom out
+    assert cfg.scope_range_mi == 60
+    assert win.poller.calls == []   # nothing sent while still scrolling
+    win._push_poll_params()         # what the debounce timer fires
+    assert win.poller.calls == [(geo.api_radius_nm(60), True)]  # wider -> re-poll now
+    win.zoom_in()
+    win._push_poll_params()
+    assert win.poller.calls[-1] == (geo.api_radius_nm(50), False)  # narrower -> no extra request
+    for _ in range(40):
+        win.zoom_in()
+    assert cfg.scope_range_mi == 2
+    win.poller = None
+    win.shutdown()
+
+
+def test_full_screen_toggle_keeps_widget_geometry(qapp, tmp_path):
+    cfg = Config(postcode="GL14 2AB", home_lat=HOME[0], home_lon=HOME[1])
+    cfg.window.x, cfg.window.y, cfg.window.size = 100, 100, 400
+    win = RadarWindow(cfg, tmp_path / "config.toml", start_polling=False)
+    win.show()
+    win.set_full_screen(True)
+    assert win.full_screen and cfg.window.fullscreen
+    assert not win.grab().isNull()          # paints edge-to-edge without crashing
+    win.set_full_screen(False)
+    assert not win.full_screen and not cfg.window.fullscreen
+    assert cfg.window.size == 400            # full-screen size never saved as the widget size
+    assert win.windowFlags() & Qt.WindowType.FramelessWindowHint
+    win.shutdown()
+
+
+def test_airline_names_and_silhouettes_render(qapp):
+    scope, store, _ = make_scope(500)
+    store.update([
+        {"hex": "400a01", "flight": "BAW12K", "t": "A320", "lat": HOME[0] + 0.1, "lon": HOME[1],
+         "alt_baro": 12000, "track": 90},
+        {"hex": "43c6f1", "flight": "RRR4401", "t": "A332", "dbFlags": 1, "lat": HOME[0] - 0.1,
+         "lon": HOME[1], "alt_baro": 24000, "track": 200},
+        {"hex": "400b02", "flight": "GHELI", "category": "A7", "lat": HOME[0], "lon": HOME[1] + 0.15,
+         "alt_baro": 1500, "track": 10},
+    ], NOW)
+    scope.grab()
+    lines = scope.detail_lines(store.get("400a01"), NOW)
+    assert "OPR  British Airways" in lines
+    assert "OPR  Royal Air Force" in scope.detail_lines(store.get("43c6f1"), NOW)
+    assert "Helicopter" in scope.detail_lines(store.get("400b02"), NOW)[1]
+    scope.show_operator = False
+    assert not scope.grab().isNull()
+
+
+def test_every_silhouette_builds():
+    from radarscope.aircraft_types import Category
+    from radarscope.icons import SCALE, silhouette
+    for cat in Category:
+        path = silhouette(cat)
+        box = path.boundingRect()
+        assert not path.isEmpty() and cat in SCALE
+        assert box.top() >= -1.25 and box.bottom() <= 1.1 and box.width() <= 2.2, (cat, box)

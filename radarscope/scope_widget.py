@@ -18,11 +18,19 @@ from PySide6.QtGui import (
 from PySide6.QtWidgets import QWidget
 
 from . import geo
+from .aircraft_types import LABELS as CATEGORY_LABELS
+from .icons import SCALE as ICON_SCALE, silhouette
 from .model import Aircraft, AircraftStore
 
 SWEEP_PERIOD_S = 6.0
 SWEEP_TRAIL_DEG = 40.0
 FRAME_MS = 16  # ~60 fps
+#: Aircraft further out than this multiple of the scope range are hidden rather
+#: than pinned to the rim (keeps the rim tidy when zoomed right in).
+CLIP_LIMIT = 2.0
+#: Text and icons stop growing beyond this window size, so a full-screen
+#: scope gets more room between aircraft rather than giant labels.
+DETAIL_SIZE_CAP_PX = 640
 #: Seconds for a blip's "painted by the sweep" glow to decay to ~1/e.
 SWEEP_GLOW_DECAY_S = 1.2
 
@@ -72,6 +80,7 @@ class PaintStats:
     """Counts from the most recent paint (useful for tests and the status line)."""
     on_scope: int = 0
     clipped: int = 0
+    hidden: int = 0
 
 
 @dataclass
@@ -99,6 +108,8 @@ class ScopeWidget(QWidget):
         self.last_success: float | None = None
         self.hover_hex: str | None = None
         self.selected_hex: str | None = None
+        #: Show the airline / operator name as a third label line.
+        self.show_operator = True
         self.last_paint_stats = PaintStats()
         self._targets: list[_Target] = []
 
@@ -170,14 +181,14 @@ class ScopeWidget(QWidget):
         return w / 2.0, h / 2.0, side / 2.0 - margin, side
 
     def _blip_size(self) -> float:
-        return max(4.5, self._geometry()[3] * 0.018)
+        return max(6.0, min(self._geometry()[3], DETAIL_SIZE_CAP_PX) * 0.024)
 
     def _hit_radius(self) -> float:
         return max(10.0, self._blip_size() * 2.2)
 
     def _font(self, scale: float) -> QFont:
         f = QFont(self._fixed_font)
-        f.setPixelSize(max(9, int(self._geometry()[3] * scale)))
+        f.setPixelSize(max(9, int(min(self._geometry()[3], DETAIL_SIZE_CAP_PX) * scale)))
         return f
 
     # ---- animation ----------------------------------------------------------
@@ -215,9 +226,11 @@ class ScopeWidget(QWidget):
         self.last_paint_stats = stats
 
     def _paint_background(self, p: QPainter, cx: float, cy: float, R: float) -> None:
+        win = self.window()
+        full = bool(getattr(win, "full_screen", False)) or win.isFullScreen()
         p.setPen(Qt.PenStyle.NoPen)
-        p.setBrush(COL_BG)
-        radius = max(10.0, min(self.width(), self.height()) * 0.08)
+        p.setBrush(QColor(COL_BG.red(), COL_BG.green(), COL_BG.blue()) if full else COL_BG)
+        radius = 0.0 if full else max(10.0, min(self.width(), self.height()) * 0.08)
         p.drawRoundedRect(QRectF(self.rect()), radius, radius)
         grad = QRadialGradient(QPointF(cx, cy), R)
         grad.setColorAt(0.0, QColor(10, 42, 22))
@@ -313,6 +326,9 @@ class ScopeWidget(QWidget):
             alpha = ac.opacity(now)
             if alpha <= 0.01:
                 continue
+            if rng > scope_nm * CLIP_LIMIT:
+                stats.hidden += 1
+                continue
             colour = altitude_colour(ac)
             pos = QPointF(x, y)
             targets.append(_Target(ac.hex, pos, rng, brg))
@@ -353,29 +369,35 @@ class ScopeWidget(QWidget):
                 p.setPen(QPen(with_alpha(QColor(255, 255, 255), 0.7 * alpha), 1.0, Qt.PenStyle.DashLine))
                 p.drawEllipse(pos, s * 1.9, s * 1.9)
 
-            p.setPen(QPen(with_alpha(colour, body_alpha), 1.0))
-            p.setBrush(with_alpha(colour, body_alpha * (0.45 if ac.on_ground else 1.0)))
+            # Type silhouette, rotated to the ground track (QPainter rotates
+            # clockwise; the silhouette's nose points up = North).
+            cat = ac.category
+            outline = QPen(with_alpha(colour.darker(260), body_alpha), 1.0)
+            outline.setCosmetic(True)
+            p.setPen(outline)
+            p.setBrush(with_alpha(colour, body_alpha * (0.5 if ac.on_ground else 1.0)))
             p.save()
             p.translate(pos)
             if ac.track_deg is not None:
-                p.rotate(ac.track_deg)  # QPainter rotates clockwise; 0 = nose up = North
-                p.drawPolygon(QPolygonF([QPointF(0, -s), QPointF(s * 0.62, s * 0.75),
-                                         QPointF(0, s * 0.4), QPointF(-s * 0.62, s * 0.75)]))
-            else:
-                p.drawRect(QRectF(-s * 0.5, -s * 0.5, s, s))
+                p.rotate(ac.track_deg)
+            scale = s * ICON_SCALE[cat]
+            p.scale(scale, scale)
+            p.drawPath(silhouette(cat))
             p.restore()
 
-            # Label: callsign / FLxxx, offset to the side away from the scope edge.
-            line1, line2 = ac.label, ac.flight_level
-            text_w = max(fm.horizontalAdvance(line1), fm.horizontalAdvance(line2))
-            off = s * 1.4
+            # Label: callsign / FLxxx / operator, offset to the side away from the scope edge.
+            lines = [ac.label, ac.flight_level]
+            operator = ac.operator if self.show_operator else None
+            if operator:
+                lines.append(operator)
+            text_w = max(fm.horizontalAdvance(t) for t in lines)
+            off = s * 1.5
             lx = x + off if x + off + text_w < cx + R + s * 2 else x - off - text_w
             ly = y - fm.height() * 0.15
             p.setFont(label_font)
-            p.setPen(with_alpha(colour, alpha * 0.95))
-            p.drawText(QPointF(lx, ly), line1)
-            p.setPen(with_alpha(colour, alpha * 0.7))
-            p.drawText(QPointF(lx, ly + fm.height() * 0.95), line2)
+            for i, (text, strength) in enumerate(zip(lines, (0.95, 0.7, 0.6))):
+                p.setPen(with_alpha(colour, alpha * strength))
+                p.drawText(QPointF(lx, ly + i * fm.height() * 0.95), text)
 
         self._targets = targets
         return stats
@@ -405,9 +427,10 @@ class ScopeWidget(QWidget):
     def detail_lines(self, ac: Aircraft, now: float) -> list[str]:
         """Text for the detail panel (distance in **miles**)."""
         lines = [f"{ac.label}  {ac.hex.upper()}"]
-        kind = " ".join(x for x in (ac.type_code, ac.description) if x)
-        if kind:
-            lines.append(kind)
+        kind = " ".join(x for x in (ac.type_code, ac.description or CATEGORY_LABELS[ac.category]) if x)
+        lines.append(kind)
+        if ac.operator:
+            lines.append(f"OPR  {ac.operator}")
         if ac.registration:
             lines.append(f"REG  {ac.registration}" + ("  MIL" if ac.military else ""))
         elif ac.military:

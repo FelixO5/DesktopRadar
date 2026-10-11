@@ -68,15 +68,16 @@ class Poller(QObject):
     def isRunning(self) -> bool:  # noqa: N802 - mirrors the QThread API
         return self._thread is not None and self._thread.is_alive()
 
-    def update_params(self, params: PollParams) -> None:
-        """Apply new location/range/interval/source and poll promptly."""
+    def update_params(self, params: PollParams, refresh: bool = True) -> None:
+        """Apply new location/range/interval/source; poll promptly if ``refresh``."""
         with self._params_lock:
             source_changed = params.source != self._params.source
             self._params = params
             self._failures = 0
         if source_changed:
             self._feed.set_preferred(params.source)
-        self.refresh_now()
+        if refresh:
+            self.refresh_now()
 
     def refresh_now(self) -> None:
         self._wake.set()

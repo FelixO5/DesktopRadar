@@ -4,16 +4,25 @@ A small, always-on-top desktop widget that draws a classic circular radar scope 
 on your UK postcode and plots live nearby aircraft (ADS-B) as blips under a rotating
 sweep. One Python/Qt codebase for **Linux (Ubuntu/GNOME), macOS and Windows**.
 
-- Frameless, draggable, square-resizable window that floats in a corner of the screen
+- Frameless, draggable, square-resizable window that floats in a corner of the screen,
+  or goes **full screen** (`F`, or View › Enter Full Screen on a Mac)
+- **Scroll or pinch to zoom** the range in and out (2–250 miles)
+- Can be built into a proper **macOS app** (`RadarScope.app`) — see below
 - Range rings at 25/50/75/100 % of the scope range, labelled in **statute miles**
 - Clockwise sweep (6 s/rev, ~60 fps) with a fading afterglow; blips brighten as the sweep
   passes and decay, like a real PPI scope
-- Blips are triangles pointing along each aircraft's ground track, labelled
-  callsign + `FLxxx`, colour-banded by altitude (amber < 10,000 ft, green < 30,000 ft,
-  cyan above, grey on the ground) and dimmed as their position ages
+- Each aircraft is drawn as a **silhouette of its type** (light aircraft, turboprop, small
+  jet, airliner, wide-body, four-engine heavy, military transport, fighter, helicopter,
+  glider, balloon, drone), pointing along its ground track. The type comes from the ICAO
+  type code (`A320`, `EUFI`, …), falling back to the transponder's emitter category
+- Labels show callsign, `FLxxx` and the **airline / operator** (British Airways, Ryanair,
+  Royal Air Force, US Air Force, …) worked out from the callsign; military aircraft on
+  tactical callsigns show "UK Military" / "US Military" from their address block
+- Colour-banded by altitude (amber < 10,000 ft, green < 30,000 ft, cyan above, grey on
+  the ground) and dimmed as their position ages
 - Military aircraft (as flagged in the feed's `dbFlags`) are magenta at any altitude
 - Emergency squawks (7500/7600/7700) are red with a flashing ring, overriding other colours
-- Hover a blip for details; click to pin them (callsign, type, registration, altitude +
+- Hover a blip for details; click to pin them (callsign, type, operator, registration, altitude +
   climb/descent arrow, ground speed, track, squawk, distance in miles and bearing from home)
 - Blips glide between polls (dead-reckoning from ground speed and track), then snap to
   the true position on each poll
@@ -58,12 +67,15 @@ Command-line options: `--config-dir DIR` (use another config directory), `--verb
 |---|---|
 | Move | drag anywhere on the scope that isn't a blip |
 | Resize | drag an edge or corner (kept square) |
+| Zoom | scroll wheel / two-finger scroll, trackpad pinch, or `+` / `-` (steps through 2, 3, 5, 8, 10, 15, 20, 25, 30, 40, 50, 60, 80, 100, 125, 150, 200, 250 mi) |
+| Full screen | `F` (or ⌃⌘F / View › Enter Full Screen on a Mac); `Esc` or `F` to leave |
 | Details | hover a blip; click to pin, click again / Esc to unpin |
-| Menu | right-click: Settings, Refresh, Range, Always on top, About, Quit |
-| Range | `+` / `-` step through 10 / 25 / 50 / 100 / 150 / 250 mi |
-| Refresh / Settings / Quit | `R` / `S` / `Ctrl+Q` |
+| Menu | right-click: Settings, Refresh, Full screen, Range, Show airline names, Always on top, About, Quit |
+| Refresh / Settings / Quit | `R` / `S` / `Ctrl+Q` (`⌘Q` on a Mac) |
 
-A system-tray icon (where the desktop has a tray) offers show/hide and the same menu.
+A system-tray / menu-bar icon (where the desktop has one) offers show/hide and the same
+menu. On a Mac the app also has a normal Dock icon and File / View menus in the menu bar.
+Full screen is remembered: if you quit while full screen, it reopens full screen.
 
 ## Configuration
 
@@ -87,12 +99,14 @@ home_lon       = -2.49
 scope_range_mi = 50           # statute miles, 1–287
 poll_seconds   = 8            # 5–120
 data_source    = "adsb.lol"   # or "airplanes.live" (the other is the automatic fallback)
+show_airline_names = true     # third label line with the operator
 
 [window]
 x = 1500                      # omitted = top-right corner of the primary screen
 y = 60
 size = 360
 always_on_top = true
+fullscreen = false            # reopen full screen
 ```
 
 Window position and size are saved as you move/resize. A saved position that is no longer
@@ -127,10 +141,23 @@ choose their own position. These work under **X11 / XWayland**, so:
 - Optional systemd user service: see the comments in `systemd/radarscope.service`.
 
 ### macOS
-Always-on-top and positioning work natively. The window is a `Qt.Tool` window, so it
-doesn't take a Dock icon or app-switcher slot; use the menu-bar icon or right-click › Quit.
-To start at login, edit the path in `packaging/macos-launchd/com.user.radarscope.plist`
-and copy it to `~/Library/LaunchAgents/` (instructions are in the file).
+Always-on-top and positioning work natively. RadarScope has a Dock icon, File / View
+menus, and a menu-bar icon; full screen opens in its own Space like any Mac app.
+
+**Make it a real Mac app.** With the venv set up as above, run this once from the
+DesktopRadar folder:
+```bash
+bash packaging/macos/build_app.sh
+```
+It installs the build tool (PyInstaller) into the venv, builds `RadarScope.app` with its
+own icon, and copies it to `/Applications` (or `~/Applications`). From then on, open
+RadarScope from Launchpad, Spotlight or the Dock — no Terminal needed. The app is
+self-contained, so re-run the script after updating the code. Its log is written to
+`~/Library/Application Support/radarscope/radarscope.log`.
+
+To start at login, either add `RadarScope.app` under System Settings › General ›
+Login Items, or edit the path in `packaging/macos-launchd/com.user.radarscope.plist` and
+copy it to `~/Library/LaunchAgents/` (instructions are in the file).
 
 ### Windows
 Always-on-top and positioning work natively; high-DPI scaling is automatic. The widget
@@ -170,6 +197,9 @@ radarscope/
   __main__.py        python -m radarscope
   main.py            QApplication, frameless window, wiring, main()
   scope_widget.py    QPainter: rings, sweep, blips, labels, hit-testing, detail panel
+  icons.py           vector silhouettes per aircraft category
+  aircraft_types.py  ICAO type code / emitter category -> silhouette category
+  airlines.py        callsign -> airline / operator name, military address blocks
   geo.py             haversine, bearing, polar→screen, dead-reckoning (no Qt/network)
   data_source.py     postcodes.io + adsb.lol / airplanes.live clients, failover
   poller.py          background worker thread + Qt signals, backoff
@@ -178,7 +208,7 @@ radarscope/
   settings_dialog.py postcode / range / interval / source dialog, About box
 radarscope.desktop   Linux launcher (QT_QPA_PLATFORM=xcb;wayland)
 systemd/             optional Linux user service
-packaging/           optional macOS launchd agent and Windows startup launcher
+packaging/           macOS app build script, launchd agent, Windows startup launcher
 tests/
 ```
 

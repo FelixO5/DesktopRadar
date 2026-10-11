@@ -18,6 +18,8 @@ def test_round_trip(tmp_path):
     cfg = Config(postcode="GL14 2AB", home_lat=51.82, home_lon=-2.49, scope_range_mi=75,
                  poll_seconds=10, data_source="airplanes.live")
     cfg.window.x, cfg.window.y, cfg.window.size = 1500, 60, 400
+    cfg.window.fullscreen = True
+    cfg.show_airline_names = False
     path = save_config(cfg, tmp_path / "sub" / "config.toml")  # creates the directory
     loaded = load_config(path)
     assert loaded == cfg

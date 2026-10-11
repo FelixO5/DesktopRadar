@@ -8,12 +8,16 @@ import os
 import sys
 from pathlib import Path
 
-from PySide6.QtCore import QEvent, QPoint, QPointF, QRect, Qt, QTimer
-from PySide6.QtGui import QAction, QActionGroup, QColor, QCursor, QGuiApplication, QIcon, QKeySequence, QPainter, QPen, QPixmap
-from PySide6.QtWidgets import QApplication, QDialog, QMenu, QSystemTrayIcon, QVBoxLayout, QWidget
+from PySide6.QtCore import QEvent, QPoint, QPointF, QRect, QRectF, Qt, QTimer
+from PySide6.QtGui import (
+    QAction, QActionGroup, QColor, QGuiApplication, QIcon, QKeySequence, QPainter, QPainterPath, QPen, QPixmap,
+)
+from PySide6.QtWidgets import QApplication, QDialog, QMenu, QMenuBar, QSystemTrayIcon, QVBoxLayout, QWidget
 
 from . import __version__, geo
+from .aircraft_types import Category
 from .config import MAX_WINDOW_SIZE, MIN_WINDOW_SIZE, Config, config_path, load_config, save_config
+from .icons import silhouette
 from .model import AircraftStore
 from .poller import Poller, PollParams
 from .scope_widget import PHOSPHOR, ScopeWidget
@@ -23,6 +27,12 @@ log = logging.getLogger("radarscope")
 
 APP_NAME = "RadarScope"
 RANGE_PRESETS_MI = (10, 25, 50, 100, 150, 250)
+#: Ranges that scroll / pinch / +/- step through (tidy ring labels at every step).
+ZOOM_LADDER_MI = (2, 3, 5, 8, 10, 15, 20, 25, 30, 40, 50, 60, 80, 100, 125, 150, 200, 250)
+#: Scroll-wheel delta per zoom step (one notch on a mouse wheel).
+WHEEL_STEP = 120
+#: Accumulated pinch scale per zoom step (trackpad).
+PINCH_STEP = 0.12
 EDGE_GRAB_PX = 10
 SCREEN_MARGIN_PX = 20
 
@@ -81,23 +91,48 @@ def quit_app() -> None:
     QApplication.quit()
 
 
-def make_icon() -> QIcon:
-    pm = QPixmap(64, 64)
+def render_icon(size: int = 256) -> QPixmap:
+    """The app icon (a small radar scope with a contact), drawn at ``size`` px."""
+    pm = QPixmap(size, size)
     pm.fill(Qt.GlobalColor.transparent)
     p = QPainter(pm)
     p.setRenderHint(QPainter.RenderHint.Antialiasing)
-    p.setBrush(QColor(4, 20, 10))
-    p.setPen(QPen(PHOSPHOR, 3))
-    p.drawEllipse(QPointF(32, 32), 29, 29)
-    p.setPen(QPen(PHOSPHOR, 2))
-    p.drawEllipse(QPointF(32, 32), 15, 15)
-    p.setPen(QPen(PHOSPHOR, 3))
-    p.drawLine(QPointF(32, 32), QPointF(52, 12))
-    p.setBrush(QColor(255, 176, 0))
+    p.scale(size / 64, size / 64)
     p.setPen(Qt.PenStyle.NoPen)
-    p.drawEllipse(QPointF(22, 40), 4, 4)
+    p.setBrush(QColor(12, 18, 14))
+    p.drawRoundedRect(QRectF(2, 2, 60, 60), 13, 13)  # macOS-style rounded square
+    centre = QPointF(32, 32)
+    p.setBrush(QColor(4, 30, 14))
+    p.setPen(QPen(PHOSPHOR, 1.6))
+    p.drawEllipse(centre, 25, 25)
+    p.setBrush(Qt.BrushStyle.NoBrush)
+    p.setPen(QPen(QColor(60, 255, 120, 110), 1.0))
+    p.drawEllipse(centre, 16.5, 16.5)
+    p.drawEllipse(centre, 8, 8)
+    p.drawLine(QPointF(7, 32), QPointF(57, 32))
+    p.drawLine(QPointF(32, 7), QPointF(32, 57))
+    trail = QPainterPath(centre)
+    trail.arcTo(QRectF(7, 7, 50, 50), 45, 40)
+    trail.closeSubpath()
+    p.setPen(Qt.PenStyle.NoPen)
+    p.setBrush(QColor(60, 255, 120, 90))
+    p.drawPath(trail)
+    p.setPen(QPen(PHOSPHOR, 2.0))
+    p.drawLine(centre, QPointF(32 + 17.7, 32 - 17.7))
+    p.save()
+    p.translate(22, 41)
+    p.rotate(45)
+    p.scale(6.5, 6.5)
+    p.setPen(Qt.PenStyle.NoPen)
+    p.setBrush(QColor(255, 176, 0))
+    p.drawPath(silhouette(Category.NARROWBODY))
+    p.restore()
     p.end()
-    return QIcon(pm)
+    return pm
+
+
+def make_icon() -> QIcon:
+    return QIcon(render_icon(256))
 
 
 # ---- the window -----------------------------------------------------------------
@@ -111,17 +146,17 @@ class RadarWindow(QWidget):
         self.cfg_path = cfg_path
         self.setWindowTitle(APP_NAME)
         self.setWindowIcon(make_icon())
+        self._fullscreen = False
+        self._normal_geometry: QRect | None = None
         self._apply_window_flags()
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
-        if IS_MACOS:
-            # Qt.Tool windows otherwise hide whenever the app is not frontmost.
-            self.setAttribute(Qt.WidgetAttribute.WA_MacAlwaysShowToolWindow)
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         self.setMinimumSize(MIN_WINDOW_SIZE, MIN_WINDOW_SIZE)
 
         self.store = AircraftStore()
         self.scope = ScopeWidget(self.store, self)
         self.scope.set_range_miles(cfg.scope_range_mi)
+        self.scope.show_operator = cfg.show_airline_names
         if cfg.has_home:
             self.scope.set_home(cfg.home_lat, cfg.home_lon)
         self.scope.installEventFilter(self)
@@ -133,6 +168,15 @@ class RadarWindow(QWidget):
 
         self._move_origin: tuple[QPointF, QPoint] | None = None
         self._resize_origin: tuple[set[str], QPointF, QRect] | None = None
+        self._wheel_accum = 0.0
+        self._pinch_accum = 0.0
+
+        # Zooming changes the feed radius; wait until it settles before re-polling.
+        self._poll_update_timer = QTimer(self)
+        self._poll_update_timer.setSingleShot(True)
+        self._poll_update_timer.setInterval(700)
+        self._poll_update_timer.timeout.connect(self._push_poll_params)
+        self._pushed_radius_nm = geo.api_radius_nm(cfg.scope_range_mi)
 
         self._save_timer = QTimer(self)
         self._save_timer.setSingleShot(True)
@@ -146,19 +190,50 @@ class RadarWindow(QWidget):
             self._start_poller()
         self.scope.start_animation()
         self.tray = self._make_tray()
+        self.menu_bar = self._make_menu_bar() if IS_MACOS else None
 
     # ---- flags & geometry ---------------------------------------------------
 
     def _apply_window_flags(self) -> None:
+        if self._fullscreen:
+            # A normal window, so macOS gives it its own full-screen Space.
+            self.setWindowFlags(Qt.WindowType.Window)
+            return
         flags = Qt.WindowType.FramelessWindowHint
-        if IS_MACOS or IS_WINDOWS:
-            # A "widget" feel: no Dock icon / taskbar button (tray + menu instead).
+        if IS_WINDOWS:
+            # A "widget" feel on Windows: no taskbar button (tray + menu instead).
             flags |= Qt.WindowType.Tool
         else:
             flags |= Qt.WindowType.Window
         if self.cfg.window.always_on_top:
             flags |= Qt.WindowType.WindowStaysOnTopHint
         self.setWindowFlags(flags)
+
+    @property
+    def full_screen(self) -> bool:
+        return self._fullscreen
+
+    def set_full_screen(self, on: bool) -> None:
+        """Switch between the floating widget and full screen (remembered next launch)."""
+        if on == self._fullscreen:
+            return
+        if on:
+            self._normal_geometry = self.geometry()
+            self._fullscreen = True
+            self._apply_window_flags()
+            self.showFullScreen()
+        else:
+            self._fullscreen = False
+            self._apply_window_flags()
+            self.showNormal()
+            if self._normal_geometry is not None:
+                self.setGeometry(self._normal_geometry)
+        self.cfg.window.fullscreen = on
+        self.activateWindow()
+        self.save()
+
+    def toggle_full_screen(self) -> None:
+        self.set_full_screen(not self._fullscreen)
 
     def _restore_geometry(self) -> None:
         size = max(MIN_WINDOW_SIZE, min(MAX_WINDOW_SIZE, self.cfg.window.size))
@@ -177,6 +252,9 @@ class RadarWindow(QWidget):
 
     def set_always_on_top(self, on: bool) -> None:
         self.cfg.window.always_on_top = on
+        if self._fullscreen:
+            self._schedule_save()  # applies when leaving full screen
+            return
         pos, visible = self.pos(), self.isVisible()
         self._apply_window_flags()
         self.move(pos)
@@ -204,8 +282,17 @@ class RadarWindow(QWidget):
         self.scope.mark_failure(message)
         self.scope.setToolTip(f"Feed error: {message} (retry in {retry_in:.0f}s)")
 
+    def _push_poll_params(self) -> None:
+        """Send the (settled) zoom range to the poller; re-poll only if it grew."""
+        if self.poller is None or not self.cfg.has_home:
+            return
+        params = self._poll_params()
+        self.poller.update_params(params, refresh=params.radius_nm > self._pushed_radius_nm)
+        self._pushed_radius_nm = params.radius_nm
+
     def _config_changed(self, location_changed: bool) -> None:
         self.scope.set_range_miles(self.cfg.scope_range_mi)
+        self.scope.show_operator = self.cfg.show_airline_names
         if location_changed:
             self.store.clear()
             self.scope.selected_hex = self.scope.hover_hex = None
@@ -215,20 +302,39 @@ class RadarWindow(QWidget):
                 self._start_poller()
             else:
                 self.poller.update_params(self._poll_params())
+                self._pushed_radius_nm = geo.api_radius_nm(self.cfg.scope_range_mi)
         self.save()
 
     def set_range(self, miles: int) -> None:
-        self.cfg.scope_range_mi = max(geo.MIN_SCOPE_RANGE_MI, min(geo.MAX_SCOPE_RANGE_MI, miles))
-        self._config_changed(location_changed=False)
+        """Change the scope range (miles); cheap enough to call on every scroll step."""
+        miles = max(geo.MIN_SCOPE_RANGE_MI, min(geo.MAX_SCOPE_RANGE_MI, int(miles)))
+        if miles == self.cfg.scope_range_mi:
+            return
+        self.cfg.scope_range_mi = miles
+        self.scope.set_range_miles(miles)
+        self._poll_update_timer.start()
+        self._schedule_save()
 
     def step_range(self, direction: int) -> None:
+        """One step along the zoom ladder: +1 = longer range (zoom out), -1 = zoom in."""
         cur = self.cfg.scope_range_mi
         if direction > 0:
-            nxt = next((r for r in RANGE_PRESETS_MI if r > cur), geo.MAX_SCOPE_RANGE_MI)
+            nxt = next((r for r in ZOOM_LADDER_MI if r > cur), geo.MAX_SCOPE_RANGE_MI)
         else:
-            nxt = next((r for r in reversed(RANGE_PRESETS_MI) if r < cur), RANGE_PRESETS_MI[0])
-        if nxt != cur:
-            self.set_range(nxt)
+            nxt = next((r for r in reversed(ZOOM_LADDER_MI) if r < cur), ZOOM_LADDER_MI[0])
+        self.set_range(nxt)
+
+    def zoom_in(self) -> None:
+        self.step_range(-1)
+
+    def zoom_out(self) -> None:
+        self.step_range(+1)
+
+    def set_show_airline_names(self, on: bool) -> None:
+        self.cfg.show_airline_names = on
+        self.scope.show_operator = on
+        self.scope.update()
+        self._schedule_save()
 
     def open_settings(self) -> None:
         dlg = SettingsDialog(self.cfg, self)
@@ -250,9 +356,10 @@ class RadarWindow(QWidget):
 
     def save(self) -> None:
         self._save_timer.stop()
-        if self._can_position() and self.isVisible():
-            self.cfg.window.x, self.cfg.window.y = self.x(), self.y()
-        self.cfg.window.size = self.width()
+        if not self._fullscreen:  # keep the widget's own size/place for next time
+            if self._can_position() and self.isVisible():
+                self.cfg.window.x, self.cfg.window.y = self.x(), self.y()
+            self.cfg.window.size = self.width()
         try:
             save_config(self.cfg, self.cfg_path)
         except OSError as exc:
@@ -277,10 +384,14 @@ class RadarWindow(QWidget):
 
     # ---- menu / tray / keys -------------------------------------------------
 
-    def build_menu(self, parent: QWidget | None = None) -> QMenu:
-        menu = QMenu(parent or self)
+    def build_menu(self, parent: QWidget | None = None, menu: QMenu | None = None) -> QMenu:
+        if menu is None:
+            menu = QMenu(parent or self)
         menu.addAction("Settings…", self.open_settings)
         menu.addAction("Refresh now", self.refresh_now)
+        full = QAction("Full screen", menu, checkable=True, checked=self._fullscreen)
+        full.toggled.connect(self.set_full_screen)
+        menu.addAction(full)
         rng = menu.addMenu("Range")
         group = QActionGroup(rng)
         for miles in RANGE_PRESETS_MI:
@@ -288,6 +399,9 @@ class RadarWindow(QWidget):
             act.triggered.connect(lambda _=False, m=miles: self.set_range(m))
             group.addAction(act)
             rng.addAction(act)
+        names = QAction("Show airline names", menu, checkable=True, checked=self.cfg.show_airline_names)
+        names.toggled.connect(self.set_show_airline_names)
+        menu.addAction(names)
         top = QAction("Always on top", menu, checkable=True, checked=self.cfg.window.always_on_top)
         top.toggled.connect(self.set_always_on_top)
         menu.addAction(top)
@@ -304,14 +418,58 @@ class RadarWindow(QWidget):
             return None
         tray = QSystemTrayIcon(self.windowIcon(), self)
         tray.setToolTip(APP_NAME)
-        self._tray_menu = self.build_menu()
-        self._tray_menu.insertAction(self._tray_menu.actions()[0],
-                                     QAction("Show / hide", self._tray_menu, triggered=self.toggle_visible))
+        self._tray_menu = QMenu()
+
+        def refresh_tray_menu() -> None:  # rebuilt each time so tick marks are current
+            self._tray_menu.clear()
+            self._tray_menu.addAction("Show / hide", self.toggle_visible)
+            self.build_menu(menu=self._tray_menu)
+
+        refresh_tray_menu()
+        self._tray_menu.aboutToShow.connect(refresh_tray_menu)
         tray.setContextMenu(self._tray_menu)
         tray.activated.connect(lambda reason: self.toggle_visible()
                                if reason == QSystemTrayIcon.ActivationReason.Trigger else None)
         tray.show()
         return tray
+
+    def _make_menu_bar(self) -> QMenuBar:
+        """macOS system menu bar (File / View) with the standard shortcuts."""
+        bar = QMenuBar()  # parentless = the global macOS menu bar
+        app_menu = bar.addMenu("File")
+        settings = app_menu.addAction("Settings…", QKeySequence.StandardKey.Preferences, self.open_settings)
+        settings.setMenuRole(QAction.MenuRole.PreferencesRole)
+        app_menu.addAction("Refresh now", QKeySequence("Ctrl+R"), self.refresh_now)
+        about = app_menu.addAction("About RadarScope", lambda: show_about(self))
+        about.setMenuRole(QAction.MenuRole.AboutRole)
+        quit_action = app_menu.addAction("Quit RadarScope", QKeySequence.StandardKey.Quit, quit_app)
+        quit_action.setMenuRole(QAction.MenuRole.QuitRole)
+
+        view = bar.addMenu("View")
+        self._act_full = view.addAction("Enter Full Screen", QKeySequence.StandardKey.FullScreen,
+                                        self.toggle_full_screen)
+        self._act_full.setMenuRole(QAction.MenuRole.NoRole)
+        view.addSeparator()
+        view.addAction("Zoom In", QKeySequence.StandardKey.ZoomIn, self.zoom_in)
+        view.addAction("Zoom Out", QKeySequence.StandardKey.ZoomOut, self.zoom_out)
+        view.addSeparator()
+        self._act_names = view.addAction("Show Airline Names")
+        self._act_names.setCheckable(True)
+        self._act_names.toggled.connect(self.set_show_airline_names)
+        self._act_top = view.addAction("Always on Top")
+        self._act_top.setCheckable(True)
+        self._act_top.toggled.connect(self.set_always_on_top)
+        view.aboutToShow.connect(self._sync_menu_bar)
+        self._sync_menu_bar()
+        return bar
+
+    def _sync_menu_bar(self) -> None:
+        self._act_full.setText("Exit Full Screen" if self._fullscreen else "Enter Full Screen")
+        for action, state in ((self._act_names, self.cfg.show_airline_names),
+                              (self._act_top, self.cfg.window.always_on_top)):
+            action.blockSignals(True)
+            action.setChecked(state)
+            action.blockSignals(False)
 
     def toggle_visible(self) -> None:
         if self.isVisible():
@@ -323,9 +481,13 @@ class RadarWindow(QWidget):
     def keyPressEvent(self, event) -> None:  # noqa: N802
         key = event.key()
         if key in (Qt.Key.Key_Plus, Qt.Key.Key_Equal):
-            self.step_range(+1)
+            self.zoom_in()
         elif key in (Qt.Key.Key_Minus, Qt.Key.Key_Underscore):
-            self.step_range(-1)
+            self.zoom_out()
+        elif key == Qt.Key.Key_F and not event.modifiers() & Qt.KeyboardModifier.ControlModifier:
+            self.toggle_full_screen()
+        elif key == Qt.Key.Key_Escape and self._fullscreen:
+            self.set_full_screen(False)
         elif key == Qt.Key.Key_R:
             self.refresh_now()
         elif key == Qt.Key.Key_S:
@@ -369,9 +531,24 @@ class RadarWindow(QWidget):
         if obj is not self.scope:
             return super().eventFilter(obj, event)
         etype = event.type()
+        if etype == QEvent.Type.Wheel:
+            self._wheel_accum += event.angleDelta().y()
+            while abs(self._wheel_accum) >= WHEEL_STEP:
+                step = 1 if self._wheel_accum > 0 else -1
+                self._wheel_accum -= step * WHEEL_STEP
+                self.zoom_in() if step > 0 else self.zoom_out()
+            return True
+        if (etype == QEvent.Type.NativeGesture
+                and event.gestureType() == Qt.NativeGestureType.ZoomNativeGesture):
+            self._pinch_accum += event.value()  # trackpad pinch: + spread = zoom in
+            while abs(self._pinch_accum) >= PINCH_STEP:
+                step = 1 if self._pinch_accum > 0 else -1
+                self._pinch_accum -= step * PINCH_STEP
+                self.zoom_in() if step > 0 else self.zoom_out()
+            return True
         if etype == QEvent.Type.MouseButtonPress and event.button() == Qt.MouseButton.LeftButton:
             pos = event.position()
-            edges = self._edges_at(pos)
+            edges = set() if self._fullscreen else self._edges_at(pos)
             if edges:
                 self._resize_origin = (edges, event.globalPosition(), self.geometry())
                 return True
@@ -379,6 +556,8 @@ class RadarWindow(QWidget):
                 if self.scope.selected_hex is not None:
                     self.scope.selected_hex = None
                     self.scope.update()
+                if self._fullscreen:
+                    return True
                 handle = self.windowHandle()
                 if handle is None or not handle.startSystemMove():
                     self._move_origin = (event.globalPosition(), self.pos())
@@ -392,7 +571,7 @@ class RadarWindow(QWidget):
                 delta = (event.globalPosition() - start).toPoint()
                 self.move(origin + delta)
                 return True
-            edges = self._edges_at(event.position())
+            edges = set() if self._fullscreen else self._edges_at(event.position())
             if edges:
                 self.scope.setCursor(self._cursor_for(edges))
             elif self.scope.blip_at(event.position()) is not None:
@@ -436,13 +615,17 @@ def parse_args(argv: list[str] | None) -> argparse.Namespace:
     ap.add_argument("--quit-after", type=float, metavar="SECONDS",
                     help="exit cleanly after SECONDS (smoke testing)")
     ap.add_argument("-v", "--verbose", action="store_true", help="log debugging information")
-    return ap.parse_args(argv)
+    args, unknown = ap.parse_known_args(argv)
+    # Finder may pass e.g. -psn_0_12345 to app bundles; ignore anything we don't know.
+    args.ignored = unknown
+    return args
 
 
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(sys.argv[1:] if argv is None else argv)
     log_kwargs: dict = {}
-    if sys.stderr is None:  # pythonw.exe / no console: log to a file in the config dir
+    if sys.stderr is None or getattr(sys, "frozen", False):
+        # pythonw.exe / RadarScope.app have no terminal: log to a file in the config dir.
         log_dir = config_path(args.config_dir).parent
         log_dir.mkdir(parents=True, exist_ok=True)
         log_kwargs["filename"] = str(log_dir / "radarscope.log")
@@ -478,6 +661,8 @@ def main(argv: list[str] | None = None) -> int:
     window = RadarWindow(cfg, path)
     app.aboutToQuit.connect(window.shutdown)
     window.show()
+    if cfg.window.fullscreen:
+        window.set_full_screen(True)
     return app.exec()
 
 

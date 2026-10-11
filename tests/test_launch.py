@@ -63,3 +63,16 @@ def test_console_script_launches(tmp_path):
     # Run from an unrelated directory so the installed package, not the checkout, is used.
     proc = run([shutil.which("radarscope"), "--quit-after", "2"], cfg_dir, cwd=tmp_path)
     assert proc.returncode == 0, proc.stderr
+
+
+def test_finder_process_serial_argument_is_ignored(tmp_path):
+    # Finder can launch app bundles with "-psn_0_<n>"; it must not stop the app starting.
+    proc = run([sys.executable, "-m", "radarscope", "-psn_0_12345", "--version"], tmp_path)
+    assert proc.returncode == 0, proc.stderr
+
+
+def test_app_icon_renders(tmp_path):
+    out = tmp_path / "icon.png"
+    proc = run([sys.executable, str(REPO / "packaging" / "make_icon.py"), str(out), "512"], tmp_path)
+    assert proc.returncode == 0, proc.stderr
+    assert out.stat().st_size > 1000

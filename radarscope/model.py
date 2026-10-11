@@ -7,9 +7,12 @@ so the model is immune to wall-clock / NTP / DST changes and easy to test.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from functools import cached_property
 from typing import Any, Iterable
 
 from . import geo
+from .aircraft_types import Category, classify
+from .airlines import operator_name
 
 EMERGENCY_SQUAWKS = {"7500": "HIJACK", "7600": "RADIO FAIL", "7700": "EMERGENCY"}
 #: dbFlags bit for military aircraft (ADSB-Exchange v2 convention).
@@ -55,6 +58,8 @@ class Aircraft:
     baro_rate: float | None = None
     squawk: str = ""
     db_flags: int = 0
+    #: ADS-B emitter category, e.g. "A3" (large aircraft), "A7" (rotorcraft).
+    emitter_category: str = ""
     #: Set when the aircraft has started fading out.
     expiring_since: float | None = None
 
@@ -88,6 +93,7 @@ class Aircraft:
             baro_rate=_num(obj.get("baro_rate")) if obj.get("baro_rate") is not None else _num(obj.get("geom_rate")),
             squawk=_text(obj.get("squawk")),
             db_flags=flags if isinstance(flags, int) and not isinstance(flags, bool) else 0,
+            emitter_category=_text(obj.get("category")).upper(),
         )
 
     # ---- derived properties -------------------------------------------------
@@ -114,6 +120,16 @@ class Aircraft:
     @property
     def military(self) -> bool:
         return bool(self.db_flags & DBFLAG_MILITARY)
+
+    @cached_property
+    def category(self) -> Category:
+        """Silhouette category (airliner, fighter, helicopter, ...)."""
+        return classify(self.type_code, self.emitter_category)
+
+    @cached_property
+    def operator(self) -> str | None:
+        """Airline / operator name from the callsign (or military address block)."""
+        return operator_name(self.callsign, self.hex, self.military)
 
     @property
     def vertical_trend(self) -> int:
