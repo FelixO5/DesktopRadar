@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Optional macOS login agent. Edit the ProgramArguments path to point at your
+  installed `radarscope` script (e.g. /Users/you/radarscope/.venv/bin/radarscope), then:
+    cp packaging/macos-launchd/com.user.radarscope.plist ~/Library/LaunchAgents/
+    launchctl load ~/Library/LaunchAgents/com.user.radarscope.plist
+  Do NOT set QT_QPA_PLATFORM here; the xcb workaround is Linux-only.
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.user.radarscope</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/Users/YOU/radarscope/.venv/bin/radarscope</string>
+    </array>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <dict>
+        <key>SuccessfulExit</key>
+        <false/>
+    </dict>
+    <key>ProcessType</key>
+    <string>Interactive</string>
+    <key>StandardErrorPath</key>
+    <string>/tmp/radarscope.err.log</string>
+</dict>
+</plist>

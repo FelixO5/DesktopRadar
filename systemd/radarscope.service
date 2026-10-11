@@ -1,0 +1,19 @@
+# Optional Linux user service. Install with:
+#   mkdir -p ~/.config/systemd/user && cp systemd/radarscope.service ~/.config/systemd/user/
+#   systemctl --user daemon-reload && systemctl --user enable --now radarscope.service
+# Assumes `radarscope` was installed with `pip install --user .` (i.e. ~/.local/bin);
+# edit ExecStart if you installed into a venv, e.g. /path/to/.venv/bin/radarscope
+[Unit]
+Description=RadarScope ADS-B radar desktop widget
+PartOf=graphical-session.target
+After=graphical-session.target
+
+[Service]
+Type=simple
+Environment="QT_QPA_PLATFORM=xcb;wayland"
+ExecStart=%h/.local/bin/radarscope
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=graphical-session.target

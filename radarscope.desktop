@@ -1,0 +1,13 @@
+[Desktop Entry]
+Type=Application
+Name=RadarScope
+GenericName=ADS-B Radar Widget
+Comment=Always-on-top radar scope showing live aircraft near your postcode
+# Prefer XWayland (xcb) so always-on-top and positioning work on GNOME/Wayland.
+# The ";wayland" fallback keeps it starting natively if the xcb plugin can't load.
+Exec=env "QT_QPA_PLATFORM=xcb;wayland" radarscope
+Icon=radar
+Terminal=false
+Categories=Utility;
+StartupNotify=false
+X-GNOME-Autostart-enabled=true
