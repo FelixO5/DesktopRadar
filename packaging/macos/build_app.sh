@@ -29,46 +29,46 @@ else
     exit 1
 fi
 
-"$PY" - <<'PYCHECK'
+"${PY}" - <<'PYCHECK'
 import sys
 if sys.version_info < (3, 11):
     sys.exit(f"Python 3.11+ is needed, this is {sys.version.split()[0]}")
 PYCHECK
 
-echo "==> Installing RadarScope's libraries and the app builder (PyInstaller)…"
-"$PY" -m pip install --quiet --disable-pip-version-check -r requirements.txt
-"$PY" -m pip install --quiet --disable-pip-version-check --upgrade pyinstaller pillow
+echo "==> Installing RadarScope's libraries and the app builder (PyInstaller)..."
+"${PY}" -m pip install --quiet --disable-pip-version-check -r requirements.txt
+"${PY}" -m pip install --quiet --disable-pip-version-check --upgrade pyinstaller pillow
 
-echo "==> Drawing the app icon…"
-ICON="$ROOT/build/RadarScope-icon.png"
-"$PY" "$ROOT/packaging/make_icon.py" "$ICON" 1024 >/dev/null
+echo "==> Drawing the app icon..."
+ICON="${ROOT}/build/RadarScope-icon.png"
+"${PY}" "${ROOT}/packaging/make_icon.py" "${ICON}" 1024 >/dev/null
 
-echo "==> Building RadarScope.app (this can take a few minutes)…"
-"$PY" -m PyInstaller --noconfirm --clean --log-level WARN \
+echo "==> Building RadarScope.app (this can take a few minutes)..."
+"${PY}" -m PyInstaller --noconfirm --clean --log-level WARN \
     --windowed \
     --name RadarScope \
-    --icon "$ICON" \
+    --icon "${ICON}" \
     --osx-bundle-identifier io.github.felixo5.radarscope \
-    --paths "$ROOT" \
-    --distpath "$ROOT/dist" --workpath "$ROOT/build/pyinstaller" --specpath "$ROOT/build" \
-    "$ROOT/packaging/radarscope_app.py"
+    --paths "${ROOT}" \
+    --distpath "${ROOT}/dist" --workpath "${ROOT}/build/pyinstaller" --specpath "${ROOT}/build" \
+    "${ROOT}/packaging/radarscope_app.py"
 
-APP="$ROOT/dist/RadarScope.app"
-if [[ ! -d "$APP" ]]; then
-    echo "Build failed: $APP was not created." >&2
+APP="${ROOT}/dist/RadarScope.app"
+if [[ ! -d "${APP}" ]]; then
+    echo "Build failed: ${APP} was not created." >&2
     exit 1
 fi
 
 DEST="/Applications"
-if [[ ! -w "$DEST" ]]; then
-    DEST="$HOME/Applications"
-    mkdir -p "$DEST"
+if [[ ! -w "${DEST}" ]]; then
+    DEST="${HOME}/Applications"
+    mkdir -p "${DEST}"
 fi
-echo "==> Copying to $DEST…"
-rm -rf "$DEST/RadarScope.app"
-ditto "$APP" "$DEST/RadarScope.app"
+echo "==> Copying to ${DEST}..."
+rm -rf "${DEST}/RadarScope.app"
+ditto "${APP}" "${DEST}/RadarScope.app"
 
 echo
-echo "Done! RadarScope is in $DEST."
+echo "Done! RadarScope is in ${DEST}."
 echo "Open it from Launchpad or Spotlight (Cmd+Space, type RadarScope)."
 echo "To keep it in the Dock: while it's running, right-click its Dock icon > Options > Keep in Dock."
